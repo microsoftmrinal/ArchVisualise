@@ -1,0 +1,254 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "Azure Architecture Diagram API",
+    "description": "Generates editable Azure architecture diagrams (PNG and draw.io) from structured JSON.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://diagram-api.yellowdune-01c84401.eastus.azurecontainerapps.io"
+    }
+  ],
+  "paths": {
+    "/generate": {
+      "post": {
+        "operationId": "GenerateDiagram",
+        "summary": "Generate an Azure architecture diagram",
+        "description": "Accepts structured JSON with components, connections, and groups. Returns file paths for PNG, DOT, and DRAWIO outputs.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DiagramRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Diagram generated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiagramResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Diagram generation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/download/{filename}": {
+      "get": {
+        "operationId": "DownloadFile",
+        "summary": "Download a generated diagram file",
+        "description": "Returns the generated file (PNG, DOT, or DRAWIO) by filename.",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The filename to download (e.g., my_architecture.png, my_architecture.drawio)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File returned successfully",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "File not found"
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "HealthCheck",
+        "summary": "Check API health",
+        "description": "Returns API health status.",
+        "responses": {
+          "200": {
+            "description": "API is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Component": {
+        "type": "object",
+        "required": ["id", "type", "label"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique identifier for the component (e.g., vm1, lb1, sql1)"
+          },
+          "type": {
+            "type": "string",
+            "description": "Azure component type (e.g., vm, load balancer, sql server, app service)"
+          },
+          "label": {
+            "type": "string",
+            "description": "Display label shown on the diagram"
+          },
+          "tier": {
+            "type": "string",
+            "description": "Tier for color-coded grouping",
+            "enum": ["frontend", "web", "backend", "app", "database", "data", "loadbalancer", "security", "networking", "monitoring"],
+            "default": "frontend"
+          }
+        }
+      },
+      "Connection": {
+        "type": "object",
+        "required": ["from_id", "to_id"],
+        "properties": {
+          "from_id": {
+            "type": "string",
+            "description": "Source component ID"
+          },
+          "to_id": {
+            "type": "string",
+            "description": "Target component ID"
+          },
+          "label": {
+            "type": "string",
+            "description": "Connection label (e.g., HTTPS, Port 1433, SSH)",
+            "default": ""
+          }
+        }
+      },
+      "Group": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Display name for the group (e.g., Web Subnet, Data Tier)"
+          },
+          "tier": {
+            "type": "string",
+            "description": "Tier for background color",
+            "enum": ["frontend", "web", "backend", "app", "database", "data", "loadbalancer", "security", "networking", "monitoring"],
+            "default": "frontend"
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of component IDs that belong to this group"
+          }
+        }
+      },
+      "DiagramRequest": {
+        "type": "object",
+        "required": ["name", "components", "connections"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name for the diagram (used as filename, no spaces)"
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Component"
+            },
+            "description": "List of Azure components in the architecture"
+          },
+          "connections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Connection"
+            },
+            "description": "List of connections between components"
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            },
+            "description": "Optional logical groupings (subnets, tiers)"
+          }
+        }
+      },
+      "DiagramResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "files": {
+            "type": "object",
+            "properties": {
+              "png": {
+                "type": "string",
+                "description": "Server path to the PNG file"
+              },
+              "dot": {
+                "type": "string",
+                "description": "Server path to the DOT file"
+              },
+              "drawio": {
+                "type": "string",
+                "description": "Server path to the DRAWIO file"
+              }
+            }
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "Error message from the backend"
+          }
+        }
+      }
+    }
+  }
+}
