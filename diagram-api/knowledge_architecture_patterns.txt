@@ -1,0 +1,39 @@
+Azure Architecture Patterns Reference
+3-Tier Web Application
+Components: Load Balancer or Application Gateway (frontend), 2+ VMs or App Services (backend), SQL Server or Cosmos DB (database)
+Groups: Web Subnet (frontend tier), App Subnet (backend tier), Data Subnet (database tier)
+Connections: LB -> VMs (HTTPS/443), VMs -> Database (SQL/1433 or HTTPS/443)
+When to use: Traditional web applications with separate presentation, business logic, and data layers.
+Hub-Spoke Network
+Components: Firewall + VNet (hub), multiple spoke VNets with their own resources, VNet peering connections
+Groups: Hub VNet (networking), Spoke 1 VNet, Spoke 2 VNet
+Connections: Spokes -> Hub Firewall (all traffic), Hub -> On-premises (VPN/ExpressRoute)
+When to use: Enterprise networks with centralized security and shared services.
+Microservices with Container Apps
+Components: Front Door or Application Gateway (frontend), multiple Container Instances or App Services (backend), Cosmos DB or SQL (data), Service Bus (messaging)
+Groups: API Gateway tier, Microservices tier, Data tier, Messaging tier
+When to use: Independently deployable services that communicate via APIs or message queues.
+Event-Driven / Serverless
+Components: Service Bus or Event Grid (messaging), Function Apps (compute), Storage Account (data), Cosmos DB (state), App Insights (monitoring)
+Groups: Ingestion tier, Processing tier, Storage tier
+When to use: Event processing, data pipelines, batch processing, IoT data flows.
+Web App with High Availability
+Components: Front Door (global LB), Application Gateway + WAF per region, App Service with deployment slots, SQL Server with geo-replication, Key Vault (secrets)
+Groups: Global tier (Front Door), Regional tier (AppGW + App Services), Data tier (SQL + replication)
+When to use: Applications requiring 99.95%+ SLA with multi-region failover.
+Secure Web App (PaaS)
+Components: Application Gateway with WAF, App Service with VNet integration, SQL Server with Private Endpoint, Key Vault with Private Endpoint, Managed Identity, NSG
+Groups: DMZ Subnet (AppGW), App Subnet (App Service), Data Subnet (SQL + Key Vault)
+Connections: AppGW -> App Service (HTTPS), App Service -> SQL (Private Endpoint/1433), App Service -> Key Vault (Private Endpoint/443)
+When to use: PaaS workloads requiring network isolation and zero-trust security.
+Static Website with API Backend
+Components: Front Door or CDN (frontend), Storage Account static website, Function App (API), Cosmos DB (data)
+Groups: CDN tier, API tier, Data tier
+When to use: Single-page apps (React, Angular, Vue) with serverless API backend.
+Common Add-Ons
+Add Key Vault when any component needs secrets, certificates, or connection strings
+Add Managed Identity when App Services or Functions connect to other Azure services
+Add NSG to any subnet for fine-grained traffic filtering
+Add Private Endpoints to databases and Key Vaults for network isolation
+Add App Insights + Log Analytics for monitoring any production workload
+Add Service Bus when components need async or decoupled communication

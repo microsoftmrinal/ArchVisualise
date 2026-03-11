@@ -1,7 +1,7 @@
 # diagram_builder.py
 import os
 import subprocess
-from icon_mappings import AZURE_ICON_MAP, TIER_COLORS
+from icon_mappings import AZURE_ICON_MAP, TIER_COLORS, normalize_type, auto_tier
 
 
 def build_diagram(name: str, components: list, connections: list, groups: list):
@@ -12,6 +12,19 @@ def build_diagram(name: str, components: list, connections: list, groups: list):
     """
     output_dir = "/app/diagrams"
     filename = f"{output_dir}/{name}"
+    warnings = []
+
+    # Normalize component types and tiers before processing
+    for comp in components:
+        original_type = comp["type"]
+        matched = normalize_type(original_type)
+        if matched:
+            comp["type"] = matched
+        else:
+            warnings.append(f"Unknown component type '{original_type}' for '{comp.get('label', comp['id'])}'. Using generic node.")
+        # Auto-assign tier if missing or empty
+        if not comp.get("tier") or comp["tier"] == "frontend":
+            comp["tier"] = auto_tier(comp["type"])
 
     # Collect required imports
     imports = set()
@@ -22,7 +35,7 @@ def build_diagram(name: str, components: list, connections: list, groups: list):
 
     # Build script
     lines = ["import subprocess"]
-    lines.append("from diagrams import Diagram, Cluster, Edge")
+    lines.append("from diagrams import Diagram, Cluster, Edge, Node")
     for module_path, class_name in imports:
         lines.append(f"from {module_path} import {class_name}")
 
@@ -35,6 +48,15 @@ with Diagram("{name}", filename="{filename}", show=False, outformat=["png","dot"
     for g in groups:
         grouped_ids.update(g.get("members", []))
 
+    def node_line(comp, indent):
+        key = comp["type"].lower()
+        if key in AZURE_ICON_MAP:
+            _, cls = AZURE_ICON_MAP[key]
+            return f'{indent}{comp["id"]} = {cls}("{comp.get("label", comp["id"])}")'
+        else:
+            # Fallback: use a generic Node for unknown types
+            return f'{indent}{comp["id"]} = Node("{comp.get("label", comp["id"])}")'
+
     # Write groups as Clusters
     for g in groups:
         tier = g.get("tier", "frontend")
@@ -42,23 +64,19 @@ with Diagram("{name}", filename="{filename}", show=False, outformat=["png","dot"
         lines.append(
             f'    with Cluster("{g["name"]}", graph_attr={{"fontsize":"13","bgcolor":"{color}","style":"rounded","margin":"15"}}):'
         )
+        has_members = False
         for mid in g.get("members", []):
             comp = next((c for c in components if c["id"] == mid), None)
             if comp:
-                _, cls = AZURE_ICON_MAP.get(comp["type"].lower(), (None, None))
-                if cls:
-                    lines.append(
-                        f'        {comp["id"]} = {cls}("{comp.get("label", comp["id"])}")'
-                    )
+                lines.append(node_line(comp, "        "))
+                has_members = True
+        if not has_members:
+            lines.append('        pass')
 
     # Ungrouped nodes
     for comp in components:
         if comp["id"] not in grouped_ids:
-            _, cls = AZURE_ICON_MAP.get(comp["type"].lower(), (None, None))
-            if cls:
-                lines.append(
-                    f'    {comp["id"]} = {cls}("{comp.get("label", comp["id"])}")'
-                )
+            lines.append(node_line(comp, "    "))
 
     # Connections
     for conn in connections:
@@ -81,6 +99,7 @@ with Diagram("{name}", filename="{filename}", show=False, outformat=["png","dot"
         "success": result.returncode == 0,
         "stdout": result.stdout,
         "stderr": result.stderr,
+        "warnings": warnings,
         "files": {
             "png": f"{filename}.png",
             "dot": f"{filename}.dot",

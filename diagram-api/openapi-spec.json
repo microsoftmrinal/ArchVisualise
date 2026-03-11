@@ -1,48 +1,327 @@
 {
-  "openapi": "3.0.1",
+  "swagger": "2.0",
   "info": {
     "title": "Azure Architecture Diagram API",
-    "description": "Generates editable Azure architecture diagrams (PNG and draw.io) from structured JSON.",
-    "version": "1.0.0"
+    "description": "Generates editable Azure architecture diagrams (PNG and draw.io) from structured JSON or plain text descriptions.",
+    "version": "4.0.0"
   },
-  "servers": [
-    {
-      "url": "https://diagram-api.yellowdune-01c84401.eastus.azurecontainerapps.io"
-    }
-  ],
+  "host": "diagram-api.yellowdune-01c84401.eastus.azurecontainerapps.io",
+  "basePath": "/",
+  "schemes": ["https"],
+  "consumes": ["application/json"],
+  "produces": ["application/json"],
   "paths": {
-    "/generate": {
+    "/chat": {
       "post": {
-        "operationId": "GenerateDiagram",
-        "summary": "Generate an Azure architecture diagram",
-        "description": "Accepts structured JSON with components, connections, and groups. Returns file paths for PNG, DOT, and DRAWIO outputs.",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DiagramRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Diagram generated successfully",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DiagramResponse"
+        "operationId": "Chat",
+        "summary": "Generate an architecture diagram from a plain text description",
+        "description": "Send a plain English architecture description. Returns a conversational message with download links for PNG and draw.io files. This is the primary action for Copilot Studio — just relay the 'message' field to the user.",
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "required": ["message"],
+              "properties": {
+                "message": {
+                  "type": "string",
+                  "description": "The user's message describing their architecture (e.g., 'I need a 3-tier app with a load balancer, 2 web VMs, and a SQL database')",
+                  "x-ms-summary": "User Message"
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Optional diagram name (no spaces). Defaults to 'architecture'.",
+                  "default": "architecture",
+                  "x-ms-summary": "Diagram Name"
                 }
               }
             }
-          },
-          "500": {
-            "description": "Diagram generation failed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response with diagram links or conversational reply",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "message": {
+                  "type": "string",
+                  "description": "Conversational reply to show the user. Contains component list, download links, and options for changes.",
+                  "x-ms-summary": "Reply Message"
+                },
+                "architecture_json": {
+                  "type": "string",
+                  "description": "The parsed architecture as a JSON string. Store this to support modification requests later.",
+                  "x-ms-summary": "Architecture JSON"
+                },
+                "png_url": {
+                  "type": "string",
+                  "description": "Direct download URL for the PNG diagram image. Empty if no diagram was generated.",
+                  "x-ms-summary": "PNG Download URL"
+                },
+                "drawio_url": {
+                  "type": "string",
+                  "description": "Direct download URL for the editable draw.io file. Empty if no diagram was generated.",
+                  "x-ms-summary": "Draw.io Download URL"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/generate-from-text": {
+      "post": {
+        "operationId": "GenerateDiagramFromText",
+        "summary": "Generate a diagram from a plain text description",
+        "description": "Accepts a plain English description of an Azure architecture. The backend uses Azure OpenAI to parse it into components, connections, and groups, then generates PNG and draw.io files. This is the recommended action for Copilot Studio agents.",
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "required": ["description"],
+              "properties": {
+                "description": {
+                  "type": "string",
+                  "description": "Plain English description of the Azure architecture (e.g., 'I need a 3-tier app with a load balancer, 2 web VMs, and a SQL database')",
+                  "x-ms-summary": "Architecture Description"
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Optional name for the diagram (used as filename, no spaces). Defaults to 'architecture'.",
+                  "default": "architecture",
+                  "x-ms-summary": "Diagram Name"
+                }
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Diagram generated successfully",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "success": {
+                  "type": "boolean",
+                  "description": "Whether diagram generation succeeded",
+                  "x-ms-summary": "Success"
+                },
+                "png_url": {
+                  "type": "string",
+                  "description": "Download URL for the PNG image",
+                  "x-ms-summary": "PNG Download URL"
+                },
+                "drawio_url": {
+                  "type": "string",
+                  "description": "Download URL for the editable draw.io file",
+                  "x-ms-summary": "Draw.io Download URL"
+                },
+                "dot_url": {
+                  "type": "string",
+                  "description": "Download URL for the DOT source file",
+                  "x-ms-summary": "DOT Download URL"
+                },
+                "warnings": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Warnings about unrecognized component types",
+                  "x-ms-summary": "Warnings"
+                },
+                "parsed_architecture": {
+                  "type": "object",
+                  "description": "The structured JSON parsed from the text description. Show this to the user for confirmation.",
+                  "x-ms-summary": "Parsed Architecture",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "description": "Diagram name",
+                      "x-ms-summary": "Architecture Name"
+                    },
+                    "components": {
+                      "type": "array",
+                      "description": "List of identified Azure components",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": { "type": "string", "description": "Component ID" },
+                          "type": { "type": "string", "description": "Component type" },
+                          "label": { "type": "string", "description": "Display label" },
+                          "tier": { "type": "string", "description": "Tier classification" }
+                        }
+                      }
+                    },
+                    "connections": {
+                      "type": "array",
+                      "description": "List of connections between components",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "from_id": { "type": "string", "description": "Source component ID" },
+                          "to_id": { "type": "string", "description": "Target component ID" },
+                          "label": { "type": "string", "description": "Connection protocol" }
+                        }
+                      }
+                    },
+                    "groups": {
+                      "type": "array",
+                      "description": "Logical groupings (subnets, tiers)",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": { "type": "string", "description": "Group name" },
+                          "tier": { "type": "string", "description": "Group tier" },
+                          "members": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Component IDs in this group"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/generate": {
+      "post": {
+        "operationId": "GenerateDiagram",
+        "summary": "Generate a diagram from structured JSON",
+        "description": "Accepts structured JSON with components, connections, and groups. Returns download URLs for PNG, DOT, and DRAWIO files. Use this when modifying an existing architecture.",
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "required": ["name", "components"],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Name for the diagram (used as filename, no spaces)",
+                  "x-ms-summary": "Diagram Name"
+                },
+                "components": {
+                  "type": "array",
+                  "description": "List of Azure components in the architecture",
+                  "x-ms-summary": "Components",
+                  "items": {
+                    "type": "object",
+                    "required": ["id", "type", "label"],
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "description": "Unique identifier (e.g., vm1, lb1, sql1)"
+                      },
+                      "type": {
+                        "type": "string",
+                        "description": "Azure component type (e.g., vm, load balancer, sql server)"
+                      },
+                      "label": {
+                        "type": "string",
+                        "description": "Display label on the diagram"
+                      },
+                      "tier": {
+                        "type": "string",
+                        "description": "Tier for color grouping (frontend, backend, database, security, networking, monitoring)"
+                      }
+                    }
+                  }
+                },
+                "connections": {
+                  "type": "array",
+                  "description": "Connections between components",
+                  "x-ms-summary": "Connections",
+                  "items": {
+                    "type": "object",
+                    "required": ["from_id", "to_id"],
+                    "properties": {
+                      "from_id": {
+                        "type": "string",
+                        "description": "Source component ID"
+                      },
+                      "to_id": {
+                        "type": "string",
+                        "description": "Target component ID"
+                      },
+                      "label": {
+                        "type": "string",
+                        "description": "Connection label (e.g., HTTPS, Port 1433)"
+                      }
+                    }
+                  }
+                },
+                "groups": {
+                  "type": "array",
+                  "description": "Optional logical groupings (subnets, tiers)",
+                  "x-ms-summary": "Groups",
+                  "items": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "description": "Display name for the group"
+                      },
+                      "tier": {
+                        "type": "string",
+                        "description": "Tier for background color"
+                      },
+                      "members": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Component IDs in this group"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Diagram generated successfully",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "success": {
+                  "type": "boolean",
+                  "description": "Whether diagram generation succeeded",
+                  "x-ms-summary": "Success"
+                },
+                "png_url": {
+                  "type": "string",
+                  "description": "Download URL for the PNG image",
+                  "x-ms-summary": "PNG Download URL"
+                },
+                "drawio_url": {
+                  "type": "string",
+                  "description": "Download URL for the editable draw.io file",
+                  "x-ms-summary": "Draw.io Download URL"
+                },
+                "dot_url": {
+                  "type": "string",
+                  "description": "Download URL for the DOT source file",
+                  "x-ms-summary": "DOT Download URL"
+                },
+                "warnings": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Warnings about unrecognized component types",
+                  "x-ms-summary": "Warnings"
                 }
               }
             }
@@ -60,22 +339,16 @@
             "name": "filename",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "The filename to download (e.g., my_architecture.png, my_architecture.drawio)"
+            "type": "string",
+            "description": "The filename to download (e.g., my_architecture.png, my_architecture.drawio)",
+            "x-ms-summary": "Filename"
           }
         ],
         "responses": {
           "200": {
             "description": "File returned successfully",
-            "content": {
-              "application/octet-stream": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              }
+            "schema": {
+              "type": "file"
             }
           },
           "404": {
@@ -89,19 +362,16 @@
         "operationId": "HealthCheck",
         "summary": "Check API health",
         "description": "Returns API health status.",
+        "parameters": [],
         "responses": {
           "200": {
             "description": "API is healthy",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "status": {
-                      "type": "string",
-                      "example": "ok"
-                    }
-                  }
+            "schema": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "x-ms-summary": "Status"
                 }
               }
             }
@@ -110,145 +380,6 @@
       }
     }
   },
-  "components": {
-    "schemas": {
-      "Component": {
-        "type": "object",
-        "required": ["id", "type", "label"],
-        "properties": {
-          "id": {
-            "type": "string",
-            "description": "Unique identifier for the component (e.g., vm1, lb1, sql1)"
-          },
-          "type": {
-            "type": "string",
-            "description": "Azure component type (e.g., vm, load balancer, sql server, app service)"
-          },
-          "label": {
-            "type": "string",
-            "description": "Display label shown on the diagram"
-          },
-          "tier": {
-            "type": "string",
-            "description": "Tier for color-coded grouping",
-            "enum": ["frontend", "web", "backend", "app", "database", "data", "loadbalancer", "security", "networking", "monitoring"],
-            "default": "frontend"
-          }
-        }
-      },
-      "Connection": {
-        "type": "object",
-        "required": ["from_id", "to_id"],
-        "properties": {
-          "from_id": {
-            "type": "string",
-            "description": "Source component ID"
-          },
-          "to_id": {
-            "type": "string",
-            "description": "Target component ID"
-          },
-          "label": {
-            "type": "string",
-            "description": "Connection label (e.g., HTTPS, Port 1433, SSH)",
-            "default": ""
-          }
-        }
-      },
-      "Group": {
-        "type": "object",
-        "required": ["name"],
-        "properties": {
-          "name": {
-            "type": "string",
-            "description": "Display name for the group (e.g., Web Subnet, Data Tier)"
-          },
-          "tier": {
-            "type": "string",
-            "description": "Tier for background color",
-            "enum": ["frontend", "web", "backend", "app", "database", "data", "loadbalancer", "security", "networking", "monitoring"],
-            "default": "frontend"
-          },
-          "members": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "List of component IDs that belong to this group"
-          }
-        }
-      },
-      "DiagramRequest": {
-        "type": "object",
-        "required": ["name", "components", "connections"],
-        "properties": {
-          "name": {
-            "type": "string",
-            "description": "Name for the diagram (used as filename, no spaces)"
-          },
-          "components": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Component"
-            },
-            "description": "List of Azure components in the architecture"
-          },
-          "connections": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Connection"
-            },
-            "description": "List of connections between components"
-          },
-          "groups": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Group"
-            },
-            "description": "Optional logical groupings (subnets, tiers)"
-          }
-        }
-      },
-      "DiagramResponse": {
-        "type": "object",
-        "properties": {
-          "success": {
-            "type": "boolean"
-          },
-          "stdout": {
-            "type": "string"
-          },
-          "stderr": {
-            "type": "string"
-          },
-          "files": {
-            "type": "object",
-            "properties": {
-              "png": {
-                "type": "string",
-                "description": "Server path to the PNG file"
-              },
-              "dot": {
-                "type": "string",
-                "description": "Server path to the DOT file"
-              },
-              "drawio": {
-                "type": "string",
-                "description": "Server path to the DRAWIO file"
-              }
-            }
-          }
-        }
-      },
-      "ErrorResponse": {
-        "type": "object",
-        "properties": {
-          "detail": {
-            "type": "string",
-            "description": "Error message from the backend"
-          }
-        }
-      }
-    }
-  }
+  "definitions": {},
+  "securityDefinitions": {}
 }

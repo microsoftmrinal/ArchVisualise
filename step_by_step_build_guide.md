@@ -1,30 +1,42 @@
 # Azure Architecture Diagram Agent - Step-by-Step Build Guide
 
 ## Overview
-Build a Copilot Studio agent that accepts plain text architecture descriptions from customers
-and generates editable Azure architecture diagrams (.drawio). The solution has two layers:
-- **Frontend**: Copilot Studio (conversation, orchestration)
-- **Backend**: Azure Container App (Python, diagram generation, file storage)
+A Copilot Studio agent that accepts plain text architecture descriptions from customers
+and generates editable Azure architecture diagrams (PNG + .drawio). The solution has two layers:
+- **Frontend**: Copilot Studio agent (conversation, orchestration)
+- **Backend**: Azure Container App running FastAPI + Azure OpenAI (text parsing, diagram generation)
+
+### Deployed Resources
+| Resource | Name | Region |
+|---|---|---|
+| Resource Group | `rg-arch-diagrams` | East US |
+| Container Registry | `acrarchdiagrams` (Basic, admin enabled) | East US |
+| Container App Env | `diagram-env` | East US |
+| Container App | `diagram-api` (1 CPU, 2 GB, 0-3 replicas) | East US |
+| Azure OpenAI | `aoai-arch-diagrams` (S0, gpt-4o) | East US 2 |
+
+**Base URL**: `https://diagram-api.yellowdune-01c84401.eastus.azurecontainerapps.io`
 
 ---
 
-## PHASE 1: Build the Backend (Azure Container App)
+## PHASE 1: Build the Backend
 
-### Step 1: Create the Project Structure
-Create the following folder structure for your backend API:
-
+### Step 1: Project Structure
 ```
 diagram-api/
-├── app/
-│   ├── main.py               # FastAPI application
-│   ├── diagram_builder.py    # Builds Python diagram scripts from JSON
-│   ├── icon_mappings.py      # Maps plain terms to diagrams library classes
-│   └── requirements.txt      # Python dependencies
-├── Dockerfile
-└── README.md
+├── Dockerfile                       # Multi-stage build, non-root user
+├── openapi-spec.json                # Swagger 2.0 spec for Power Platform
+├── phase3_copilot_studio_guide.md   # Copilot Studio setup instructions
+├── knowledge_architecture_patterns.md  # Knowledge source for agent
+├── knowledge_component_reference.md    # Knowledge source for agent
+└── app/
+    ├── main.py                      # FastAPI app with /chat, /generate, /generate-from-text
+    ├── diagram_builder.py           # Builds + executes diagram scripts from JSON
+    ├── icon_mappings.py             # 60+ component type aliases, fuzzy matching, tier colors
+    └── requirements.txt             # Python dependencies
 ```
 
-### Step 2: Create requirements.txt
+### Step 2: requirements.txt
 ```
 fastapi==0.115.0
 uvicorn==0.30.0
@@ -36,404 +48,266 @@ puremagic==1.30
 svg.path==7.0
 azure-storage-blob==12.19.0
 python-multipart==0.0.9
+httpx==0.27.0
+azure-identity==1.19.0
 ```
 
-### Step 3: Create the Dockerfile
+### Step 3: Dockerfile (multi-stage, non-root)
 ```dockerfile
-FROM python:3.13-slim
-
-# Install system-level GraphViz (required for diagrams + pygraphviz)
+FROM python:3.13-slim AS builder
 RUN apt-get update && \
-    apt-get install -y graphviz graphviz-dev gcc g++ && \
+    apt-get install -y --no-install-recommends graphviz graphviz-dev gcc g++ && \
     rm -rf /var/lib/apt/lists/*
-
-# Install Python dependencies
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 COPY app/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Copy application code
-COPY app/ /app
+FROM python:3.13-slim
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends graphviz && \
+    rm -rf /var/lib/apt/lists/* && apt-get clean
+RUN useradd -m -u 1000 appuser
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+COPY --chown=appuser:appuser app/ /app
 WORKDIR /app
-
-# Create output directory
-RUN mkdir -p /app/diagrams
-
+RUN mkdir -p /app/diagrams && chown -R appuser:appuser /app
+USER appuser
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')" || exit 1
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
 ```
 
-### Step 4: Create icon_mappings.py
-This file maps customer-friendly terms to the diagrams library class names:
+### Step 4: icon_mappings.py
+Maps 60+ customer-friendly terms to the `diagrams` library classes with fuzzy matching. Key features:
+- **Direct aliases**: "vm", "virtual machine", "server" all map to `VM`
+- **`normalize_type(raw)`**: Strips prefixes like "Azure ", does substring matching as fallback
+- **`auto_tier(type)`**: Auto-assigns color tier (frontend, backend, database, security, networking, monitoring)
+- **`TIER_COLORS`**: Maps tiers to hex backgrounds for diagram clusters
 
-```python
-# icon_mappings.py
-AZURE_ICON_MAP = {
-    # Compute
-    "vm": ("diagrams.azure.compute", "VM"),
-    "virtual machine": ("diagrams.azure.compute", "VM"),
-    "availability set": ("diagrams.azure.compute", "AvailabilitySets"),
-    "function app": ("diagrams.azure.compute", "FunctionApps"),
-    "container instance": ("diagrams.azure.compute", "ContainerInstances"),
-    "app service": ("diagrams.azure.compute", "AppServices"),
-    # Network
-    "vnet": ("diagrams.azure.network", "VirtualNetworks"),
-    "virtual network": ("diagrams.azure.network", "VirtualNetworks"),
-    "subnet": ("diagrams.azure.network", "Subnets"),
-    "load balancer": ("diagrams.azure.network", "LoadBalancers"),
-    "application gateway": ("diagrams.azure.network", "ApplicationGateway"),
-    "front door": ("diagrams.azure.network", "FrontDoors"),
-    "nsg": ("diagrams.azure.network", "NetworkSecurityGroupsClassic"),
-    "public ip": ("diagrams.azure.network", "PublicIpAddresses"),
-    "private endpoint": ("diagrams.azure.network", "PrivateEndpoint"),
-    "firewall": ("diagrams.azure.network", "Firewall"),
-    # Database
-    "sql server": ("diagrams.azure.database", "SQLServers"),
-    "sql database": ("diagrams.azure.database", "SQLDatabases"),
-    "cosmos db": ("diagrams.azure.database", "CosmosDb"),
-    # Storage
-    "storage account": ("diagrams.azure.storage", "StorageAccounts"),
-    "blob storage": ("diagrams.azure.storage", "BlobStorage"),
-    # Security
-    "key vault": ("diagrams.azure.security", "KeyVaults"),
-    # Identity
-    "managed identity": ("diagrams.azure.identity", "ManagedIdentities"),
-    # Integration
-    "service bus": ("diagrams.azure.integration", "ServiceBus"),
-    # Monitoring
-    "log analytics": ("diagrams.azure.analytics", "LogAnalyticsWorkspaces"),
-    "app insights": ("diagrams.azure.devops", "ApplicationInsights"),
-}
+See `diagram-api/app/icon_mappings.py` for the complete source.
 
-TIER_COLORS = {
-    "frontend": "#E3F2FD",
-    "web": "#E3F2FD",
-    "backend": "#E8F5E9",
-    "app": "#E8F5E9",
-    "database": "#FFF3E0",
-    "data": "#FFF3E0",
-    "loadbalancer": "#F3E5F5",
-    "security": "#FCE4EC",
-    "networking": "#F3E5F5",
-    "monitoring": "#E0F7FA",
-}
-```
+### Step 5: diagram_builder.py
+Dynamically generates and executes a Python diagram script. Key features:
+- Normalizes component types via `normalize_type()` before processing
+- Falls back to generic `Node()` for unrecognized types instead of silently dropping
+- Returns `warnings` array listing any unrecognized types
+- Outputs: PNG, DOT, and DRAWIO (via graphviz2drawio conversion)
 
-### Step 5: Create diagram_builder.py
-This dynamically generates and executes a Python diagram script from structured JSON:
+See `diagram-api/app/diagram_builder.py` for the complete source.
 
-```python
-# diagram_builder.py
-import os, subprocess, importlib, tempfile
-from icon_mappings import AZURE_ICON_MAP, TIER_COLORS
+### Step 6: main.py (FastAPI Application)
+Four endpoints:
 
-def build_diagram(name: str, components: list, connections: list, groups: list):
-    """
-    components: [{"id":"web1","type":"vm","label":"Web VM 1","tier":"frontend"}]
-    connections: [{"from":"lb1","to":"web1","label":"HTTPS"}]
-    groups:      [{"name":"Web Subnet","tier":"frontend","members":["web1","web2"]}]
-    """
-    output_dir = "/app/diagrams"
-    filename = f"{output_dir}/{name}"
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/chat` | POST | **Primary endpoint for Copilot Studio.** Accepts plain text, returns conversational message with download links. Handles help requests, errors, and empty input gracefully. |
+| `/generate-from-text` | POST | Accepts plain text, calls Azure OpenAI to parse, generates diagram, returns structured JSON. |
+| `/generate` | POST | Accepts structured JSON (components, connections, groups), generates diagram. For modifications. |
+| `/download/{filename}` | GET | Serves generated PNG/DOT/DRAWIO files. |
+| `/health` | GET | Health check (`{"status": "ok"}`). |
 
-    # Collect required imports
-    imports = set()
-    for comp in components:
-        key = comp["type"].lower()
-        if key in AZURE_ICON_MAP:
-            imports.add(AZURE_ICON_MAP[key])
+Key features in main.py:
+- **Flexible body parsing**: Accepts JSON objects, JSON strings, and raw text (Power Platform compatibility)
+- **Azure OpenAI via Managed Identity**: Uses `DefaultAzureCredential` — no API keys stored
+- **Accepts `from`/`to` and `from_id`/`to_id`** in connections (Python keyword workaround)
+- **`/chat` returns 4 simple strings**: `message`, `architecture_json`, `png_url`, `drawio_url`
 
-    # Build script
-    lines = ['import subprocess']
-    lines.append('from diagrams import Diagram, Cluster, Edge')
-    for module_path, class_name in imports:
-        lines.append(f'from {module_path} import {class_name}')
-
-    lines.append(f'''
-graph_attr = {{"splines":"ortho","nodesep":"0.8","ranksep":"1.2","fontsize":"14","bgcolor":"white","pad":"0.5"}}
-with Diagram("{name}", filename="{filename}", show=False, outformat=["png","dot"], direction="TB", graph_attr=graph_attr):''')
-
-    # Create grouped and ungrouped nodes
-    grouped_ids = set()
-    for g in groups:
-        grouped_ids.update(g.get("members", []))
-
-    # Write groups as Clusters
-    for g in groups:
-        tier = g.get("tier", "frontend")
-        color = TIER_COLORS.get(tier, "#FFFFFF")
-        lines.append(f'    with Cluster("{g["name"]}", graph_attr={{"fontsize":"13","bgcolor":"{color}","style":"rounded","margin":"15"}}):')
-        for mid in g.get("members", []):
-            comp = next((c for c in components if c["id"] == mid), None)
-            if comp:
-                _, cls = AZURE_ICON_MAP.get(comp["type"].lower(), (None, None))
-                if cls:
-                    lines.append(f'        {comp["id"]} = {cls}("{comp.get("label", comp["id"])}")')
-
-    # Ungrouped nodes
-    for comp in components:
-        if comp["id"] not in grouped_ids:
-            _, cls = AZURE_ICON_MAP.get(comp["type"].lower(), (None, None))
-            if cls:
-                lines.append(f'    {comp["id"]} = {cls}("{comp.get("label", comp["id"])}")')
-
-    # Connections
-    for conn in connections:
-        label = f', label="{conn["label"]}"' if conn.get("label") else ""
-        lines.append(f'    {conn["from"]} >> Edge({label}) >> {conn["to"]}')
-
-    # Add drawio conversion
-    lines.append(f'subprocess.run(["graphviz2drawio","{filename}.dot","-o","{filename}.drawio"], check=True)')
-
-    # Write and execute
-    script = "\n".join(lines)
-    script_path = f"{output_dir}/{name}_gen.py"
-    with open(script_path, "w") as f:
-        f.write(script)
-
-    result = subprocess.run(["python", script_path], capture_output=True, text=True)
-    return {
-        "success": result.returncode == 0,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-        "files": {
-            "png": f"{filename}.png",
-            "dot": f"{filename}.dot",
-            "drawio": f"{filename}.drawio",
-        }
-    }
-```
-
-### Step 6: Create main.py (FastAPI Application)
-```python
-# main.py
-import os, base64
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from diagram_builder import build_diagram
-
-app = FastAPI(title="Azure Architecture Diagram API")
-
-class Component(BaseModel):
-    id: str
-    type: str
-    label: str
-    tier: str = "frontend"
-
-class Connection(BaseModel):
-    from_id: str   # renamed from "from" since it is a Python keyword
-    to_id: str     # renamed from "to" for consistency
-    label: str = ""
-
-class Group(BaseModel):
-    name: str
-    tier: str = "frontend"
-    members: list[str] = []
-
-class DiagramRequest(BaseModel):
-    name: str
-    components: list[Component]
-    connections: list[Connection]
-    groups: list[Group] = []
-
-@app.post("/generate")
-def generate(req: DiagramRequest):
-    conns = [{"from": c.from_id, "to": c.to_id, "label": c.label} for c in req.connections]
-    comps = [c.model_dump() for c in req.components]
-    grps = [g.model_dump() for g in req.groups]
-    result = build_diagram(req.name, comps, conns, grps)
-    if not result["success"]:
-        raise HTTPException(status_code=500, detail=result["stderr"])
-    return result
-
-@app.get("/download/{filename}")
-def download(filename: str):
-    path = f"/app/diagrams/{filename}"
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(path, filename=filename)
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-```
+See `diagram-api/app/main.py` for the complete source.
 
 ---
 
 ## PHASE 2: Deploy to Azure
 
-### Step 7: Create Azure Container Registry
+### Step 7: Create Resource Group and ACR
 ```bash
+# Register required providers (one-time)
+az provider register --namespace Microsoft.ContainerRegistry
+az provider register --namespace Microsoft.App
+az provider register --namespace Microsoft.OperationalInsights
+
+# Create resources
 az group create --name rg-arch-diagrams --location eastus
-az acr create --resource-group rg-arch-diagrams --name acrarchdiagrams --sku Basic
-az acr login --name acrarchdiagrams
+az acr create --resource-group rg-arch-diagrams --name acrarchdiagrams --sku Basic --admin-enabled true
 ```
 
-### Step 8: Build and Push Docker Image
+### Step 8: Build and Push Docker Image (ACR Build — no local Docker needed)
 ```bash
-cd diagram-api
-docker build -t acrarchdiagrams.azurecr.io/diagram-api:v1 .
-docker push acrarchdiagrams.azurecr.io/diagram-api:v1
+# Build remotely in ACR (avoids needing Docker Desktop)
+az acr build --registry acrarchdiagrams --image diagram-api:v7 diagram-api/ --no-logs
 ```
 
 ### Step 9: Deploy Azure Container App
 ```bash
-az containerapp env create \
-  --name diagram-env \
-  --resource-group rg-arch-diagrams \
-  --location eastus
+# Create environment
+az containerapp env create --name diagram-env --resource-group rg-arch-diagrams --location eastus
 
+# Deploy (ACR credentials are auto-fetched)
 az containerapp create \
   --name diagram-api \
   --resource-group rg-arch-diagrams \
   --environment diagram-env \
-  --image acrarchdiagrams.azurecr.io/diagram-api:v1 \
+  --image acrarchdiagrams.azurecr.io/diagram-api:v7 \
   --target-port 8080 \
   --ingress external \
   --registry-server acrarchdiagrams.azurecr.io \
+  --registry-username acrarchdiagrams \
+  --registry-password "$(az acr credential show --name acrarchdiagrams --query 'passwords[0].value' -o tsv)" \
   --min-replicas 0 \
-  --max-replicas 3
+  --max-replicas 3 \
+  --cpu 1.0 --memory 2.0Gi
+```
+
+### Step 9b: Create Azure OpenAI and Configure Managed Identity
+```bash
+# Create Azure OpenAI resource
+az cognitiveservices account create \
+  --name aoai-arch-diagrams --resource-group rg-arch-diagrams \
+  --kind OpenAI --sku S0 --location eastus2 \
+  --custom-domain aoai-arch-diagrams
+
+# Deploy gpt-4o model
+az cognitiveservices account deployment create \
+  --name aoai-arch-diagrams --resource-group rg-arch-diagrams \
+  --deployment-name gpt-4o --model-name gpt-4o --model-version "2024-11-20" \
+  --model-format OpenAI --sku-capacity 10 --sku-name "GlobalStandard"
+
+# Assign system-managed identity to Container App
+az containerapp identity assign --name diagram-api --resource-group rg-arch-diagrams --system-assigned
+
+# Grant OpenAI User role to the Container App's identity
+PRINCIPAL_ID=$(az containerapp identity show --name diagram-api --resource-group rg-arch-diagrams --query principalId -o tsv)
+AOAI_ID=$(az cognitiveservices account show --name aoai-arch-diagrams --resource-group rg-arch-diagrams --query id -o tsv)
+az role assignment create --assignee $PRINCIPAL_ID --role "Cognitive Services OpenAI User" --scope $AOAI_ID
+
+# Set environment variables on Container App
+az containerapp update --name diagram-api --resource-group rg-arch-diagrams \
+  --set-env-vars \
+    "AZURE_OPENAI_ENDPOINT=https://aoai-arch-diagrams.openai.azure.com/" \
+    "AZURE_OPENAI_DEPLOYMENT=gpt-4o"
 ```
 
 ### Step 10: Verify Deployment
 ```bash
-# Get the URL
-az containerapp show --name diagram-api --resource-group rg-arch-diagrams --query properties.configuration.ingress.fqdn -o tsv
+# Health check
+curl https://diagram-api.yellowdune-01c84401.eastus.azurecontainerapps.io/health
 
-# Test health endpoint
-curl https://<your-app-url>/health
-
-# Test diagram generation
-curl -X POST https://<your-app-url>/generate \
+# Test the /chat endpoint (primary endpoint for Copilot Studio)
+curl -X POST https://diagram-api.yellowdune-01c84401.eastus.azurecontainerapps.io/chat \
   -H "Content-Type: application/json" \
-  -d '{
-    "name": "test_arch",
-    "components": [
-      {"id": "lb1", "type": "load balancer", "label": "Load Balancer", "tier": "loadbalancer"},
-      {"id": "vm1", "type": "vm", "label": "Web VM", "tier": "frontend"}
-    ],
-    "connections": [{"from_id": "lb1", "to_id": "vm1", "label": "HTTP"}],
-    "groups": [{"name": "Web Tier", "tier": "frontend", "members": ["vm1"]}]
-  }'
+  -d '{"message": "I need a web app with a load balancer, 2 VMs, and a SQL database"}'
 ```
+
+Expected response: a JSON object with `message` (conversational reply with download links), `png_url`, `drawio_url`, and `architecture_json`.
 
 ---
 
 ## PHASE 3: Configure Copilot Studio
 
+See `diagram-api/phase3_copilot_studio_guide.md` for the detailed walkthrough. Summary:
+
 ### Step 11: Create the Agent
-1. Go to https://copilotstudio.microsoft.com
-2. Create a new Agent
-3. Name: "Azure Architecture Diagram Generator"
-4. Paste the agent instructions from `copilot_agent_instructions.md` into the Instructions field
+- Go to copilotstudio.microsoft.com > Create > New agent
+- Name: `Azure Architecture Diagram Generator`
+- Paste `copilot_agent_instructions.md` into the Instructions field
 
-### Step 12: Add the Custom Connector
-1. Go to Power Platform > Custom Connectors
-2. Create new connector from blank
-3. Set host to your Container App URL (from Step 10)
-4. Define the POST /generate action:
-   - Request body: DiagramRequest schema (name, components, connections, groups)
-   - Response body: success, files object with URLs
-5. Define the GET /download/{filename} action
-6. Test the connector
+### Step 12: Add Custom Connector
+- Go to make.powerapps.com > Custom connectors > Import OpenAPI file
+- Upload `diagram-api/openapi-spec.json` (Swagger 2.0, v4.0.0)
+- Primary action: **Chat** (POST /chat) — 2 inputs, 4 outputs, all strings
+- Test: HealthCheck, then Chat with a description
 
-### Step 13: Create Topics
+### Step 13: Create a Single Topic
+With the `/chat` endpoint, you only need **one topic**:
 
-**Topic 1: Describe Architecture**
-- Trigger: "create diagram", "generate architecture", "draw architecture"
-- Flow:
-  1. Ask: "Describe your Azure architecture. For example: I need a 3-tier app with
-     a load balancer, 2 web VMs, and a SQL database."
-  2. Store response in variable `architectureDescription`
-  3. Use Generative AI to parse description into structured JSON (components, connections, groups)
-  4. Confirm with user: "I identified these components: [list]. Shall I generate the diagram?"
-  5. On confirm: Call Plugin Action (POST /generate)
-  6. Return: "Your diagram is ready. Download links: [PNG] [DRAWIO].
-     The .drawio file is fully editable at app.diagrams.net or VS Code draw.io extension."
+**Topic: Architecture Diagram**
+- Trigger: "create diagram", "generate architecture", "help", etc.
+- Node 1 (Question): Capture user input
+- Node 2 (Action): Call `Chat`, pass user input as `message`
+- Node 3 (Message): Display the `message` output
 
-**Topic 2: Modify Diagram**
-- Trigger: "change diagram", "add component", "remove", "modify"
-- Flow:
-  1. Ask: "What changes would you like? (e.g., add a Redis cache, remove the second VM)"
-  2. Update the stored component list
-  3. Re-call POST /generate with updated data
-  4. Return updated download links
-
-**Topic 3: Help / Explain**
-- Trigger: "how to edit", "what is drawio", "help"
-- Flow: Explain how to open and edit .drawio files, supported Azure services
+The `/chat` endpoint handles help, greetings, diagram generation, and error messages — all server-side.
 
 ### Step 14: Add Knowledge Sources (Optional)
-Upload reference documents to Copilot Studio Knowledge:
-- Azure service descriptions and when to use each
-- Common architecture patterns (hub-spoke, 3-tier, microservices, event-driven)
-- Icon name reference list
+Upload `knowledge_architecture_patterns.md` and `knowledge_component_reference.md`.
 
-### Step 15: Test End-to-End
-1. Open the agent in Copilot Studio test panel
-2. Type: "Create an architecture with a front door, application gateway, 2 web app VMs
-   behind a load balancer, and a SQL database"
-3. Verify the agent asks clarifying questions if needed
-4. Verify it calls the backend API
-5. Verify you receive working PNG and DRAWIO download links
-6. Open the .drawio file and confirm it is editable
+### Step 15: End-to-End Test
+Test in Copilot Studio test panel with:
+1. "I need a 3-tier app with a load balancer, 2 VMs, and a SQL database"
+2. "What can you do?"
+3. "Create a hub-spoke network with a firewall and two spoke VNets"
 
 ---
 
 ## PHASE 4: Optional Enhancements
 
-### Step 16: Add Azure Blob Storage for File Persistence
-Instead of serving files directly from the container, upload them to Blob Storage
-for permanent URLs and sharing:
-
+### Step 16: Azure Blob Storage for File Persistence
+The Container App scales to zero — files are lost on scale-down. For persistent downloads:
 ```bash
 az storage account create --name starchdiagrams --resource-group rg-arch-diagrams --sku Standard_LRS
 az storage container create --name diagrams --account-name starchdiagrams --public-access blob
 ```
-
-Update main.py to upload files to blob storage and return blob URLs.
+Update main.py to upload to Blob Storage and return blob URLs.
 
 ### Step 17: Add Authentication
-Secure the API endpoint:
-- Enable Azure AD authentication on the Container App
-- Configure the Copilot Studio custom connector to use OAuth2
+- Enable Azure AD auth on the Container App
+- Configure OAuth2 on the custom connector
 
-### Step 18: Add IaC Parsing (Terraform/Bicep/ARM)
-Add a POST /parse-iac endpoint that accepts IaC file content,
-extracts resources and relationships, and returns the same JSON structure
-that /generate accepts. This enables customers to upload their existing
-infrastructure code as an alternative to plain text descriptions.
+### Step 18: IaC Parsing (Terraform/Bicep/ARM)
+Add `POST /parse-iac` to accept infrastructure-as-code and extract resources into the diagram JSON format.
 
 ---
 
-## Quick Reference: API Contract
+## Quick Reference: API Endpoints
 
-**POST /generate**
+### POST /chat (recommended for Copilot Studio)
+```json
+// Request
+{"message": "I need a web app with a load balancer, 2 VMs, and a SQL database"}
+
+// Response
+{
+  "message": "Your architecture diagram has been generated!\n\n**Components:**\n...\n\n**Download:**\n- [PNG](https://...)\n- [Draw.io](https://...)",
+  "architecture_json": "{...}",
+  "png_url": "https://diagram-api.../download/web_app.png",
+  "drawio_url": "https://diagram-api.../download/web_app.drawio"
+}
+```
+
+### POST /generate (for modifications)
 ```json
 {
   "name": "my_architecture",
   "components": [
-    {"id": "lb1", "type": "load balancer", "label": "Public LB", "tier": "loadbalancer"},
-    {"id": "vm1", "type": "vm", "label": "Web VM 1", "tier": "frontend"},
-    {"id": "vm2", "type": "vm", "label": "Web VM 2", "tier": "frontend"},
+    {"id": "lb1", "type": "load balancer", "label": "Public LB", "tier": "frontend"},
+    {"id": "vm1", "type": "vm", "label": "Web VM 1", "tier": "backend"},
     {"id": "sql1", "type": "sql server", "label": "SQL Server", "tier": "database"}
   ],
   "connections": [
     {"from_id": "lb1", "to_id": "vm1", "label": "HTTPS"},
-    {"from_id": "lb1", "to_id": "vm2", "label": "HTTPS"},
-    {"from_id": "vm1", "to_id": "sql1", "label": "Port 1433"},
-    {"from_id": "vm2", "to_id": "sql1", "label": "Port 1433"}
+    {"from_id": "vm1", "to_id": "sql1", "label": "Port 1433"}
   ],
   "groups": [
-    {"name": "Web Subnet", "tier": "frontend", "members": ["vm1", "vm2"]},
+    {"name": "Web Subnet", "tier": "frontend", "members": ["vm1"]},
     {"name": "Data Subnet", "tier": "database", "members": ["sql1"]}
   ]
 }
 ```
 
-**Supported component types:**
-vm, virtual machine, availability set, function app, container instance, app service,
-vnet, virtual network, subnet, load balancer, application gateway, front door, nsg,
-public ip, private endpoint, firewall, sql server, sql database, cosmos db,
-storage account, blob storage, key vault, managed identity, service bus,
-log analytics, app insights
+### Supported Component Types (60+ aliases)
+vm, virtual machine, server, load balancer, lb, application gateway, app gateway, waf,
+front door, cdn, sql server, sql database, sql, azure sql, cosmos db, cosmosdb, nosql,
+redis, redis cache, cache, storage account, storage, blob storage, function app, function,
+serverless, container instance, aci, container, app service, web app, key vault, keyvault,
+vnet, virtual network, subnet, nsg, network security group, firewall, azure firewall,
+public ip, pip, private endpoint, private link, service bus, message queue,
+managed identity, log analytics, app insights, application insights
+
+### Rebuild & Redeploy
+```bash
+az acr build --registry acrarchdiagrams --image diagram-api:v7 diagram-api/ --no-logs
+az containerapp update --name diagram-api --resource-group rg-arch-diagrams --image acrarchdiagrams.azurecr.io/diagram-api:v7
+```
