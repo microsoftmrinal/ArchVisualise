@@ -2,6 +2,7 @@
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -22,8 +23,9 @@ AOAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
 STORAGE_ACCOUNT_NAME = os.getenv("AZURE_STORAGE_ACCOUNT", "starchdiagrams")
 STORAGE_CONTAINER = os.getenv("AZURE_STORAGE_CONTAINER", "diagrams")
 
-# Managed Identity credential (shared for OpenAI + Blob Storage)
+# Cached singletons (shared for OpenAI + Blob Storage)
 _credential = None
+_blob_service_client = None
 
 
 def _get_credential():
@@ -34,56 +36,70 @@ def _get_credential():
 
 
 def _get_blob_service_client():
-    """Get BlobServiceClient using Managed Identity."""
-    account_url = f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net"
-    return BlobServiceClient(account_url, credential=_get_credential())
-
-
-def _upload_to_blob(local_path: str, blob_name: str, content_type: str = "application/octet-stream") -> str:
-    """Upload a file to Azure Blob Storage and return a SAS URL valid for 24 hours."""
-    try:
-        blob_client = _get_blob_service_client().get_blob_client(
-            container=STORAGE_CONTAINER, blob=blob_name
-        )
-        with open(local_path, "rb") as f:
-            blob_client.upload_blob(f, overwrite=True, content_settings=ContentSettings(
-                content_type=content_type
-            ))
-
-        # Generate a user delegation SAS token (works with Managed Identity, no account key needed)
-        delegation_key = _get_blob_service_client().get_user_delegation_key(
-            key_start_time=datetime.now(timezone.utc) - timedelta(minutes=5),
-            key_expiry_time=datetime.now(timezone.utc) + timedelta(hours=24),
-        )
-        sas_token = generate_blob_sas(
-            account_name=STORAGE_ACCOUNT_NAME,
-            container_name=STORAGE_CONTAINER,
-            blob_name=blob_name,
-            user_delegation_key=delegation_key,
-            permission=BlobSasPermissions(read=True),
-            expiry=datetime.now(timezone.utc) + timedelta(hours=24),
-        )
-        return f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net/{STORAGE_CONTAINER}/{blob_name}?{sas_token}"
-    except Exception as e:
-        print(f"[WARN] Blob upload failed for {blob_name}: {e}")
-        return ""
+    """Get cached BlobServiceClient using Managed Identity."""
+    global _blob_service_client
+    if _blob_service_client is None:
+        account_url = f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net"
+        _blob_service_client = BlobServiceClient(account_url, credential=_get_credential())
+    return _blob_service_client
 
 
 def _upload_diagram_files(name: str) -> dict:
-    """Upload PNG, DOT, and DRAWIO files to blob storage. Returns dict of blob URLs."""
+    """Upload PNG, DOT, and DRAWIO files to blob storage concurrently.
+    Gets the delegation key once and reuses it for all files."""
     output_dir = "/app/diagrams"
-    urls = {}
     file_map = {
         "png": (f"{output_dir}/{name}.png", f"{name}.png", "image/png"),
         "drawio": (f"{output_dir}/{name}.drawio", f"{name}.drawio", "application/xml"),
         "dot": (f"{output_dir}/{name}.dot", f"{name}.dot", "text/plain"),
     }
-    for key, (local_path, blob_name, content_type) in file_map.items():
-        if os.path.exists(local_path):
-            url = _upload_to_blob(local_path, blob_name, content_type)
-            if url:
-                urls[key] = url
-    return urls
+
+    # Filter to files that exist
+    to_upload = {k: v for k, v in file_map.items() if os.path.exists(v[0])}
+    if not to_upload:
+        return {}
+
+    try:
+        client = _get_blob_service_client()
+        now = datetime.now(timezone.utc)
+
+        # Get delegation key once for all files
+        delegation_key = client.get_user_delegation_key(
+            key_start_time=now - timedelta(minutes=5),
+            key_expiry_time=now + timedelta(hours=24),
+        )
+        sas_expiry = now + timedelta(hours=24)
+
+        def upload_one(key, local_path, blob_name, content_type):
+            blob_client = client.get_blob_client(container=STORAGE_CONTAINER, blob=blob_name)
+            with open(local_path, "rb") as f:
+                blob_client.upload_blob(f, overwrite=True, content_settings=ContentSettings(
+                    content_type=content_type
+                ))
+            sas_token = generate_blob_sas(
+                account_name=STORAGE_ACCOUNT_NAME,
+                container_name=STORAGE_CONTAINER,
+                blob_name=blob_name,
+                user_delegation_key=delegation_key,
+                permission=BlobSasPermissions(read=True),
+                expiry=sas_expiry,
+            )
+            return key, f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net/{STORAGE_CONTAINER}/{blob_name}?{sas_token}"
+
+        # Upload all files concurrently
+        urls = {}
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(upload_one, k, lp, bn, ct) for k, (lp, bn, ct) in to_upload.items()]
+            for future in futures:
+                try:
+                    key, url = future.result(timeout=30)
+                    urls[key] = url
+                except Exception as e:
+                    print(f"[WARN] Blob upload failed: {e}")
+        return urls
+    except Exception as e:
+        print(f"[WARN] Blob storage unavailable: {e}")
+        return {}
 
 
 class Component(BaseModel):
