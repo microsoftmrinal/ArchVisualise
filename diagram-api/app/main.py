@@ -2,11 +2,13 @@
 import json
 import os
 import re
+from datetime import datetime, timedelta, timezone
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, model_validator
 from azure.identity import DefaultAzureCredential
+from azure.storage.blob import BlobServiceClient, BlobSasPermissions, ContentSettings, generate_blob_sas
 from diagram_builder import build_diagram
 
 app = FastAPI(title="Azure Architecture Diagram API")
@@ -16,7 +18,11 @@ AOAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
 AOAI_KEY = os.getenv("AZURE_OPENAI_KEY", "")  # Optional: falls back to Managed Identity
 AOAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
 
-# Managed Identity credential (used when AOAI_KEY is not set)
+# Azure Blob Storage config
+STORAGE_ACCOUNT_NAME = os.getenv("AZURE_STORAGE_ACCOUNT", "starchdiagrams")
+STORAGE_CONTAINER = os.getenv("AZURE_STORAGE_CONTAINER", "diagrams")
+
+# Managed Identity credential (shared for OpenAI + Blob Storage)
 _credential = None
 
 
@@ -25,6 +31,59 @@ def _get_credential():
     if _credential is None:
         _credential = DefaultAzureCredential()
     return _credential
+
+
+def _get_blob_service_client():
+    """Get BlobServiceClient using Managed Identity."""
+    account_url = f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net"
+    return BlobServiceClient(account_url, credential=_get_credential())
+
+
+def _upload_to_blob(local_path: str, blob_name: str, content_type: str = "application/octet-stream") -> str:
+    """Upload a file to Azure Blob Storage and return a SAS URL valid for 24 hours."""
+    try:
+        blob_client = _get_blob_service_client().get_blob_client(
+            container=STORAGE_CONTAINER, blob=blob_name
+        )
+        with open(local_path, "rb") as f:
+            blob_client.upload_blob(f, overwrite=True, content_settings=ContentSettings(
+                content_type=content_type
+            ))
+
+        # Generate a user delegation SAS token (works with Managed Identity, no account key needed)
+        delegation_key = _get_blob_service_client().get_user_delegation_key(
+            key_start_time=datetime.now(timezone.utc) - timedelta(minutes=5),
+            key_expiry_time=datetime.now(timezone.utc) + timedelta(hours=24),
+        )
+        sas_token = generate_blob_sas(
+            account_name=STORAGE_ACCOUNT_NAME,
+            container_name=STORAGE_CONTAINER,
+            blob_name=blob_name,
+            user_delegation_key=delegation_key,
+            permission=BlobSasPermissions(read=True),
+            expiry=datetime.now(timezone.utc) + timedelta(hours=24),
+        )
+        return f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net/{STORAGE_CONTAINER}/{blob_name}?{sas_token}"
+    except Exception as e:
+        print(f"[WARN] Blob upload failed for {blob_name}: {e}")
+        return ""
+
+
+def _upload_diagram_files(name: str) -> dict:
+    """Upload PNG, DOT, and DRAWIO files to blob storage. Returns dict of blob URLs."""
+    output_dir = "/app/diagrams"
+    urls = {}
+    file_map = {
+        "png": (f"{output_dir}/{name}.png", f"{name}.png", "image/png"),
+        "drawio": (f"{output_dir}/{name}.drawio", f"{name}.drawio", "application/xml"),
+        "dot": (f"{output_dir}/{name}.dot", f"{name}.dot", "text/plain"),
+    }
+    for key, (local_path, blob_name, content_type) in file_map.items():
+        if os.path.exists(local_path):
+            url = _upload_to_blob(local_path, blob_name, content_type)
+            if url:
+                urls[key] = url
+    return urls
 
 
 class Component(BaseModel):
@@ -89,12 +148,15 @@ def generate(req: DiagramRequest, request: Request):
     result = build_diagram(req.name, comps, conns, grps)
     if not result["success"]:
         raise HTTPException(status_code=500, detail=result["stderr"])
+
+    # Upload to blob storage for persistent URLs
+    blob_urls = _upload_diagram_files(req.name)
     base = _base_url(request)
     return {
         "success": True,
-        "png_url": f"{base}/download/{req.name}.png",
-        "drawio_url": f"{base}/download/{req.name}.drawio",
-        "dot_url": f"{base}/download/{req.name}.dot",
+        "png_url": blob_urls.get("png", f"{base}/download/{req.name}.png"),
+        "drawio_url": blob_urls.get("drawio", f"{base}/download/{req.name}.drawio"),
+        "dot_url": blob_urls.get("dot", f"{base}/download/{req.name}.dot"),
         "warnings": result.get("warnings", []),
     }
 
@@ -214,12 +276,15 @@ async def generate_from_text(request: Request):
     result = build_diagram(diagram_req.name, comps, conns, grps)
     if not result["success"]:
         raise HTTPException(status_code=500, detail=result["stderr"])
+
+    # Upload to blob storage for persistent URLs
+    blob_urls = _upload_diagram_files(diagram_req.name)
     base = _base_url(request)
     return {
         "success": True,
-        "png_url": f"{base}/download/{diagram_req.name}.png",
-        "drawio_url": f"{base}/download/{diagram_req.name}.drawio",
-        "dot_url": f"{base}/download/{diagram_req.name}.dot",
+        "png_url": blob_urls.get("png", f"{base}/download/{diagram_req.name}.png"),
+        "drawio_url": blob_urls.get("drawio", f"{base}/download/{diagram_req.name}.drawio"),
+        "dot_url": blob_urls.get("dot", f"{base}/download/{diagram_req.name}.dot"),
         "warnings": result.get("warnings", []),
         "parsed_architecture": parsed,
     }
@@ -362,8 +427,10 @@ async def chat(request: Request):
             "drawio_url": "",
         }
 
-    png_url = f"{BASE_DOMAIN}/download/{diagram_name}.png"
-    drawio_url = f"{BASE_DOMAIN}/download/{diagram_name}.drawio"
+    # Upload to blob storage for persistent URLs
+    blob_urls = _upload_diagram_files(diagram_name)
+    png_url = blob_urls.get("png", f"{BASE_DOMAIN}/download/{diagram_name}.png")
+    drawio_url = blob_urls.get("drawio", f"{BASE_DOMAIN}/download/{diagram_name}.drawio")
 
     # Build conversational response
     component_list = _format_component_list(parsed)

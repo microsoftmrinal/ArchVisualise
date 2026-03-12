@@ -14,6 +14,7 @@ and generates editable Azure architecture diagrams (PNG + .drawio). The solution
 | Container App Env | `diagram-env` | East US |
 | Container App | `diagram-api` (1 CPU, 2 GB, 0-3 replicas) | East US |
 | Azure OpenAI | `aoai-arch-diagrams` (S0, gpt-4o) | East US 2 |
+| Storage Account | `starchdiagrams` (Standard_LRS, Blob) | East US |
 
 **Base URL**: `https://diagram-api.yellowdune-01c84401.eastus.azurecontainerapps.io`
 
@@ -216,7 +217,7 @@ See `diagram-api/phase3_copilot_studio_guide.md` for the detailed walkthrough. S
 
 ### Step 12: Add Custom Connector
 - Go to make.powerapps.com > Custom connectors > Import OpenAPI file
-- Upload `diagram-api/openapi-spec.json` (Swagger 2.0, v4.0.0)
+- Upload `diagram-api/openapi-spec.json` (Swagger 2.0, v5.0.0)
 - Primary action: **Chat** (POST /chat) — 2 inputs, 4 outputs, all strings
 - Test: HealthCheck, then Chat with a description
 
@@ -242,21 +243,51 @@ Test in Copilot Studio test panel with:
 
 ---
 
-## PHASE 4: Optional Enhancements
+## PHASE 4: Azure Blob Storage for File Persistence
 
-### Step 16: Azure Blob Storage for File Persistence
-The Container App scales to zero — files are lost on scale-down. For persistent downloads:
+### Step 16: Create Storage Account and Container
+The Container App scales to zero — files are lost on scale-down. Blob Storage provides permanent download URLs.
+
 ```bash
-az storage account create --name starchdiagrams --resource-group rg-arch-diagrams --sku Standard_LRS
-az storage container create --name diagrams --account-name starchdiagrams --public-access blob
-```
-Update main.py to upload to Blob Storage and return blob URLs.
+# Create storage account
+az storage account create --name starchdiagrams --resource-group rg-arch-diagrams --sku Standard_LRS --location eastus
 
-### Step 17: Add Authentication
+# Create blob container (using Entra ID auth — shared key may be policy-disabled)
+az storage container create --name diagrams --account-name starchdiagrams --auth-mode login
+
+# Grant the Container App's Managed Identity blob write access
+PRINCIPAL_ID=$(az containerapp identity show --name diagram-api --resource-group rg-arch-diagrams --query principalId -o tsv)
+STORAGE_ID=$(az storage account show --name starchdiagrams --resource-group rg-arch-diagrams --query id -o tsv)
+az role assignment create --assignee $PRINCIPAL_ID --role "Storage Blob Data Contributor" --scope $STORAGE_ID
+
+# Set env vars on Container App
+az containerapp update --name diagram-api --resource-group rg-arch-diagrams \
+  --set-env-vars \
+    "AZURE_STORAGE_ACCOUNT=starchdiagrams" \
+    "AZURE_STORAGE_CONTAINER=diagrams"
+```
+
+**How it works:**
+- After generating diagrams, `main.py` uploads PNG, DOT, and DRAWIO files to blob storage
+- Uses `DefaultAzureCredential` (Managed Identity) — no storage keys needed
+- Generates user delegation SAS URLs valid for 24 hours (public blob access is policy-disabled)
+- Falls back to local `/download/` URLs if blob upload fails
+
+### Step 17: Rebuild and Deploy
+```bash
+az acr build --registry acrarchdiagrams --image diagram-api:v8 diagram-api/ --no-logs
+az containerapp update --name diagram-api --resource-group rg-arch-diagrams --image acrarchdiagrams.azurecr.io/diagram-api:v8
+```
+
+---
+
+## PHASE 5: Optional Enhancements
+
+### Step 18: Add Authentication
 - Enable Azure AD auth on the Container App
 - Configure OAuth2 on the custom connector
 
-### Step 18: IaC Parsing (Terraform/Bicep/ARM)
+### Step 19: IaC Parsing (Terraform/Bicep/ARM)
 Add `POST /parse-iac` to accept infrastructure-as-code and extract resources into the diagram JSON format.
 
 ---
@@ -270,10 +301,10 @@ Add `POST /parse-iac` to accept infrastructure-as-code and extract resources int
 
 // Response
 {
-  "message": "Your architecture diagram has been generated!\n\n**Components:**\n...\n\n**Download:**\n- [PNG](https://...)\n- [Draw.io](https://...)",
+  "message": "Your architecture diagram has been generated!\n\n**Components:**\n...\n\n**Download:**\n- [PNG](https://starchdiagrams.blob.core.windows.net/diagrams/...)\n- [Draw.io](https://starchdiagrams.blob.core.windows.net/diagrams/...)",
   "architecture_json": "{...}",
-  "png_url": "https://diagram-api.../download/web_app.png",
-  "drawio_url": "https://diagram-api.../download/web_app.drawio"
+  "png_url": "https://starchdiagrams.blob.core.windows.net/diagrams/web_app.png?sas_token...",
+  "drawio_url": "https://starchdiagrams.blob.core.windows.net/diagrams/web_app.drawio?sas_token..."
 }
 ```
 
@@ -308,6 +339,6 @@ managed identity, log analytics, app insights, application insights
 
 ### Rebuild & Redeploy
 ```bash
-az acr build --registry acrarchdiagrams --image diagram-api:v7 diagram-api/ --no-logs
-az containerapp update --name diagram-api --resource-group rg-arch-diagrams --image acrarchdiagrams.azurecr.io/diagram-api:v7
+az acr build --registry acrarchdiagrams --image diagram-api:v8 diagram-api/ --no-logs
+az containerapp update --name diagram-api --resource-group rg-arch-diagrams --image acrarchdiagrams.azurecr.io/diagram-api:v8
 ```

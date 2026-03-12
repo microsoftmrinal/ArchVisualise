@@ -3,7 +3,7 @@
   "info": {
     "title": "Azure Architecture Diagram API",
     "description": "Generates editable Azure architecture diagrams (PNG and draw.io) from structured JSON or plain text descriptions.",
-    "version": "4.0.0"
+    "version": "5.0.0"
   },
   "host": "diagram-api.yellowdune-01c84401.eastus.azurecontainerapps.io",
   "basePath": "/",

@@ -24,7 +24,7 @@ Base API URL: `https://diagram-api.yellowdune-01c84401.eastus.azurecontainerapps
 3. Find and pin **Custom connectors** (under Data)
 4. Click **Custom connectors** > **+ New custom connector** > **Import an OpenAPI file**
 5. Set connector name: `DiagramAPI`
-6. Click **Import** and upload: `diagram-api/openapi-spec.json` (Swagger 2.0, v4.0.0)
+6. Click **Import** and upload: `diagram-api/openapi-spec.json` (Swagger 2.0, v5.0.0)
 7. On the **General** tab, verify:
    - Scheme: **HTTPS**
    - Host: `diagram-api.yellowdune-01c84401.eastus.azurecontainerapps.io`
@@ -140,5 +140,5 @@ In Copilot Studio, go to **Knowledge** > **+ Add knowledge**. Upload:
 | SystemError in Copilot Studio | Use the `/chat` endpoint (not `/generate-from-text`). It handles all edge cases. |
 | 422 error from custom connector | Update the connector with the latest `openapi-spec.json` (v4.0.0). The `/chat` endpoint accepts any body format. |
 | Custom connector not visible | Ensure connector and agent are in the same Power Platform environment |
-| Download links return 404 | Container scaled to zero, files lost. Regenerate. Consider Blob Storage (Phase 4). |
+| Download links return 404 | If blob storage is configured, links use SAS URLs valid for 24 hours. If expired, regenerate the diagram. If blob upload fails, falls back to container-local URLs (lost on scale-to-zero). |
 | Action timeout | The `/chat` endpoint may take 15-30s (Azure OpenAI + diagram generation). Check Container App logs: `az containerapp logs show --name diagram-api --resource-group rg-arch-diagrams` |
