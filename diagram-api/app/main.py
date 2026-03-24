@@ -145,7 +145,14 @@ class TextRequest(BaseModel):
 
 
 def _base_url(request: Request) -> str:
-    return str(request.base_url).rstrip("/")
+    base = str(request.base_url).rstrip("/")
+    # Azure Container Apps (and most reverse proxies) terminate TLS and
+    # forward the original scheme in X-Forwarded-Proto.  Without this,
+    # fallback download URLs use http:// which browsers block as
+    # insecure ("Can't be downloaded securely").
+    if request.headers.get("x-forwarded-proto") == "https" and base.startswith("http://"):
+        base = "https://" + base[len("http://"):]
+    return base
 
 
 def _build_download_urls(base: str, name: str) -> dict:
@@ -456,6 +463,7 @@ async def chat(request: Request):
 
     reply = (
         f"Your architecture diagram has been generated!\n\n"
+        f"![Architecture Diagram]({png_url})\n\n"
         f"**Components I identified:**\n{component_list}\n\n"
         f"**Download your diagram:**\n"
         f"- [PNG Image]({png_url})\n"
