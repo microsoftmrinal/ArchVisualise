@@ -86,9 +86,18 @@ With the `/chat` endpoint, the backend handles all logic. You only need **one to
      - `pngUrl` = png_url
      - `drawioUrl` = drawio_url
      - `archJson` = architecture_json
+     - `adaptiveCard` = adaptive_card
 
-   **Node 3 — Message:**
+   **Node 3 — Message (Adaptive Card for inline diagram):**
+   - Click **+** > **Send a message**
+   - In the message node, click the **+** (Add) button, then select **Adaptive Card**
+   - Switch the Adaptive Card editor to **Formula** mode
+   - Paste: `Topic.adaptiveCard`
+   - This renders the diagram image inline in the chat with download buttons
+
+   **Node 3b — Message (fallback text):**
    - Display: `{chatReply}`
+   - *(This shows the text version with download links for channels that don't support Adaptive Cards)*
 
    **Node 4 — Question (follow-up):**
    - Ask: `Would you like to make any changes, create a new diagram, or are you done?`

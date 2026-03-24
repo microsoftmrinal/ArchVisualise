@@ -349,6 +349,71 @@ def _format_component_list(parsed: dict) -> str:
     return "\n".join(lines)
 
 
+def _build_adaptive_card(png_url: str, drawio_url: str, component_list: str, warnings: list) -> dict:
+    """Build an Adaptive Card JSON for inline display in Copilot Studio."""
+    body = [
+        {
+            "type": "TextBlock",
+            "text": "Your architecture diagram has been generated!",
+            "weight": "Bolder",
+            "size": "Medium",
+        },
+        {
+            "type": "Image",
+            "url": png_url,
+            "altText": "Architecture Diagram",
+            "size": "Stretch",
+        },
+        {
+            "type": "TextBlock",
+            "text": "**Components identified:**",
+            "weight": "Bolder",
+            "spacing": "Medium",
+        },
+        {
+            "type": "TextBlock",
+            "text": component_list,
+            "wrap": True,
+        },
+    ]
+
+    if warnings:
+        body.append({
+            "type": "TextBlock",
+            "text": f"**Warnings:** {'; '.join(warnings)}",
+            "color": "Attention",
+            "wrap": True,
+        })
+
+    body.append({
+        "type": "TextBlock",
+        "text": "The .drawio file is fully editable — open it in app.diagrams.net or VS Code.",
+        "wrap": True,
+        "spacing": "Medium",
+    })
+
+    actions = [
+        {
+            "type": "Action.OpenUrl",
+            "title": "Download PNG",
+            "url": png_url,
+        },
+        {
+            "type": "Action.OpenUrl",
+            "title": "Download Draw.io",
+            "url": drawio_url,
+        },
+    ]
+
+    return {
+        "type": "AdaptiveCard",
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "version": "1.4",
+        "body": body,
+        "actions": actions,
+    }
+
+
 @app.post("/chat")
 async def chat(request: Request):
     """Single endpoint for Copilot Studio. Takes plain text, returns a
@@ -477,9 +542,15 @@ async def chat(request: Request):
         f"- \"Regenerate with a different layout\""
     )
 
+    # Build Adaptive Card for inline image display in Copilot Studio
+    adaptive_card = _build_adaptive_card(
+        png_url, drawio_url, component_list, result.get("warnings", [])
+    )
+
     return {
         "message": reply,
         "architecture_json": json.dumps(parsed),
         "png_url": png_url,
         "drawio_url": drawio_url,
+        "adaptive_card": json.dumps(adaptive_card),
     }

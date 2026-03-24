@@ -65,6 +65,11 @@
                   "type": "string",
                   "description": "Direct download URL for the editable draw.io file. Empty if no diagram was generated.",
                   "x-ms-summary": "Draw.io Download URL"
+                },
+                "adaptive_card": {
+                  "type": "string",
+                  "description": "Adaptive Card JSON string for rendering the diagram inline in Copilot Studio. Use in a 'Send Adaptive Card' message node.",
+                  "x-ms-summary": "Adaptive Card"
                 }
               }
             }
