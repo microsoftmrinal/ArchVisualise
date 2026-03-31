@@ -1,0 +1,63 @@
+Azure Production Cost Estimate — ArchVisualise
+================================================
+
+Deployed Resources
+------------------
+| Resource              | SKU/Config                                  | Region    |
+|-----------------------|---------------------------------------------|-----------|
+| Resource Group        | rg-arch-diagrams                            | East US   |
+| Container Registry    | acrarchdiagrams (Basic, admin enabled)      | East US   |
+| Container App Env     | diagram-env                                 | East US   |
+| Container App         | diagram-api (1 CPU, 2 GB, 0-3 replicas)    | East US   |
+| Azure OpenAI          | aoai-arch-diagrams (S0, gpt-4o)            | East US 2 |
+| Storage Account       | starchdiagrams (Standard_LRS, Blob)         | East US   |
+| Copilot Studio        | Per-tenant license                          | —         |
+
+
+Monthly Cost per Resource
+-------------------------
+Resource                        SKU/Config                          Est. Monthly Cost   Notes
+Azure Container Apps            1 vCPU, 2 GiB, 0-3 replicas        $0 - $27            First 180K vCPU-s + 360K GiB-s free/month. Scales to zero when idle.
+Azure OpenAI (gpt-4o)          GlobalStandard, 10K TPM             $15 - $675          Pay-per-token: ~$2.50/1M input, ~$10/1M output. Dominates cost at scale.
+Azure Container Registry        Basic                               $5                  Fixed monthly fee.
+Azure Storage Account           Standard_LRS, Blob                  $1 - $5             Negligible for KB-sized diagram files + SAS URLs.
+Container Apps Environment      Includes Log Analytics              $0 - $10            First 5 GB ingestion free.
+Copilot Studio                  Per-tenant license                  $200                Includes 25,000 messages/month. Overage ~$1/1,000 messages.
+
+
+Scenario Breakdown
+------------------
+Scenario            Requests/Day    OpenAI Cost     Container Apps      Total/Month
+Low (dev/pilot)     ~50             ~$15            ~$0 (free tier)     ~$220
+Moderate            ~500            ~$200           ~$5                 ~$420
+High                ~2,000          ~$675           ~$27                ~$920
+
+
+Key Observations
+----------------
+1. Copilot Studio license ($200/mo) is the fixed baseline cost regardless of usage.
+2. Azure OpenAI is the primary variable cost — each diagram request uses ~1K input
+   tokens and ~2K output tokens for the GPT-4o parsing call. At high volumes this dominates.
+3. Container Apps on Consumption plan is very cost-efficient — it scales to zero and
+   has a generous free grant. Even at 2,000 requests/day it stays under $30/mo.
+4. Storage is negligible — diagram files are small (PNG + .drawio).
+
+
+Cost Optimization Tips
+----------------------
+- Switch to gpt-4o-mini for the parsing step to cut OpenAI costs by ~90%
+  (input: $0.15/1M, output: $1.25/1M) — architecture JSON extraction doesn't
+  require full gpt-4o reasoning.
+- Set a TPM/RPM limit on the OpenAI deployment to cap spending.
+- Container Apps min-replicas: 0 is already configured — cold starts add ~2-5s
+  latency but save cost when idle.
+- Consider Azure API Management (Consumption tier, ~$3.50/10K calls) if you need
+  rate limiting or external auth.
+
+
+Realistic Production Estimate
+-----------------------------
+$220 - $420/month for a moderate internal tool workload.
+
+
+Last updated: March 2026
